@@ -155,28 +155,26 @@ with Image.open(output_path) as img:
     img_preview.convert("RGB").save(preview_path, "JPEG", quality=75)
 
 # ----------------------------------------------------
-# 5. LINE対応ダイレクトURL生成（Oshi.at CDN・登録不要・直リンク保証）
+# 5. LINE対応画像アップロード（tmpfiles.org & ダイレクト変換）
 # ----------------------------------------------------
-def upload_direct(path):
-    # LINEサーバーが確実に直接ダウンロードできる高速ホスティング
-    upload_endpoint = "https://oshi.at"
+def upload_direct_image(path):
+    # tmpfiles.orgの正規エンドポイントへアップロード
+    upload_url = "https://tmpfiles.org/api/v1/upload"
     with open(path, "rb") as f:
-        res = requests.post(upload_endpoint, files={"f": f})
+        res = requests.post(upload_url, files={"file": f}, timeout=30)
     
     if res.status_code == 200:
-        lines = res.text.strip().split("\n")
-        # 直接画像URL行を取得
-        for line in lines:
-            line_str = line.strip()
-            if line_str.startswith("https://") and ("/d/" in line_str or line_str.endswith((".png", ".jpg"))):
-                return line_str
-        return lines[0].strip()
+        res_json = res.json()
+        raw_url = res_json["data"]["url"]
+        # LINEが直接ダウンロードできるように /dl/ を挿入した直リンクに変換
+        direct_url = raw_url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
+        return direct_url
     else:
-        raise Exception(f"アップロードエラー: {res.text}")
+        raise Exception(f"画像アップロード失敗: {res.text}")
 
 print("画像を配信CDNへアップロード中...")
-orig_url = upload_direct(output_path)
-prev_url = upload_direct(preview_path)
+orig_url = upload_direct_image(output_path)
+prev_url = upload_direct_image(preview_path)
 print(f"画像URL取得完了:\n  元画像: {orig_url}\n  プレビュー: {prev_url}")
 
 # ----------------------------------------------------
@@ -207,7 +205,7 @@ payload = {
 }
 
 line_api_url = "https://api.line.me/v2/bot/message/push"
-res_line = requests.post(line_api_url, headers=line_headers, json=payload)
+res_line = requests.post(line_api_url, headers=line_headers, json=payload, timeout=30)
 
 if res_line.status_code == 200:
     print("✅ LINEへの画像プッシュ送信が完了しました！")
