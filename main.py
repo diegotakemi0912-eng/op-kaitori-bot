@@ -19,7 +19,7 @@ if not all([GEMINI_KEY, LINE_TOKEN, LINE_USER]):
 client = genai.Client(api_key=GEMINI_KEY)
 
 # ----------------------------------------------------
-# 2. 画像読み込み & Gemini 抽出処理
+# 2. 画像読み込み & Gemini 抽出処理（429クォータ回復対応）
 # ----------------------------------------------------
 image_path = "sample.jpg"
 if not os.path.exists(image_path):
@@ -63,8 +63,12 @@ for model_name in candidate_models:
             break
         except Exception as e:
             err_msg = str(e)
-            print(f"⚠️ {model_name} 試行{attempt + 1}/3: {err_msg[:120]}...")
-            if "503" in err_msg or "UNAVAILABLE" in err_msg:
+            print(f"⚠️ {model_name} 試行{attempt + 1}/3 失敗: {err_msg[:120]}...")
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                # クォータ（1分間あたりの回数制限）リセットを待つため30秒待機
+                print("⏳ 429レート制限を検知。制限解除のため30秒待機します...")
+                time.sleep(30)
+            elif "503" in err_msg or "UNAVAILABLE" in err_msg:
                 time.sleep(5 * (attempt + 1))
             else:
                 break
@@ -72,7 +76,7 @@ for model_name in candidate_models:
         break
 
 if response is None:
-    raise RuntimeError("モデルの混雑が継続しています。少し時間を空けて再実行してください。")
+    raise RuntimeError("APIの利用制限または混雑が継続しています。数分〜数十分後に再実行してください。")
 
 raw_text = response.text.strip()
 print(f"--- Gemini 生レスポンス（先頭300文字） ---\n{raw_text[:300]}\n--------------------------")
@@ -167,40 +171,14 @@ for i, card in enumerate(calculated_results[:12]):
 draw.rectangle([0, img_h - 60, img_w, img_h], fill="#1E293B")
 draw.text((40, img_h - 45), "池袋トレカ専門店 | 営業時間 11:00-21:00", font=header_font, fill="#CBD5E1")
 
-# メイン画像保存（LINE仕様に合わせた最適化JPEG形式）
+# メイン画像保存
 output_path = "kaitori_output.jpg"
 base_img.save(output_path, "JPEG", quality=85)
 
 # ----------------------------------------------------
-# 5. LINEサーバーへの直接画像送信（外部CDN完全不要）
+# 5. LINE対応画像アップロード & 送信
 # ----------------------------------------------------
-# LINEのバイナリ送信用エンドポイント（外部画像URLを使わず直接画像をアップロード）
-print("LINEサーバーへ画像を直接アップロード中...")
-
-upload_headers = {
-    "Authorization": f"Bearer {LINE_TOKEN}",
-    "Content-Type": "image/jpeg"
-}
-
-# 1. 画像ファイルをLINEのコンテンツサーバーに直接アップロード
-upload_url = "https://api-data.line.me/v2/bot/message/push/upload"
-# 最初にテキストメッセージを送信
-text_payload = {
-    "to": LINE_USER,
-    "messages": [
-        {
-            "type": "text", 
-            "text": f"【自動買取表生成】\nカード抽出: {len(calculated_results)}件\n本日の買取表を生成しました。"
-        }
-    ]
-}
-requests.post("https://api.line.me/v2/bot/message/push", 
-              headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}, 
-              json=text_payload)
-
-# 2. 外部CDNに頼らず、最も信頼性の高い画像一時共有（uguu.se）を利用
 def upload_secure_image(path):
-    # LINEのボットクローラーを一切拒否しない直リンクCDN
     url = "https://uguu.se/upload"
     with open(path, "rb") as f:
         res = requests.post(url, files={"files[]": f}, timeout=30)
@@ -210,20 +188,29 @@ def upload_secure_image(path):
     else:
         raise Exception(f"アップロード失敗: {res.text}")
 
+print("画像を配信CDNへアップロード中...")
 direct_url = upload_secure_image(output_path)
-print(f"安全なダイレクトURL取得完了: {direct_url}")
+print(f"画像URL取得完了: {direct_url}")
 
-# 3. LINEへ画像送信
-image_payload = {
+# LINEプッシュ送信
+line_headers = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {LINE_TOKEN}"
+}
+payload = {
     "to": LINE_USER,
     "messages": [
         {
-            "type": "image",
-            "originalContentUrl": direct_url,
+            "type": "text", 
+            "text": f"【自動買取表生成】\nカード抽出: {len(calculated_results)}件\n買取表が完成しました。"
+        },
+        {
+            "type": "image", 
+            "originalContentUrl": direct_url, 
             "previewImageUrl": direct_url
         },
         {
-            "type": "text",
+            "type": "text", 
             "text": "画像を長押し保存してXへポストしてください。"
         }
     ]
@@ -231,8 +218,8 @@ image_payload = {
 
 res_line = requests.post(
     "https://api.line.me/v2/bot/message/push",
-    headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"},
-    json=image_payload,
+    headers=line_headers,
+    json=payload,
     timeout=30
 )
 
