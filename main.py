@@ -39,8 +39,9 @@ prompt = """
 ]
 """
 
+# 推奨モデル gemini-3.6-flash を指定
 response = client.models.generate_content(
-    model="gemini-2.5-flash",
+    model="gemini-3.6-flash",
     contents=[image, prompt],
     config=types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -120,7 +121,7 @@ draw.text((40, img_h - 45), "池袋トレカ専門店 | 営業時間 11:00-21:00
 output_path = "kaitori_output.png"
 base_img.save(output_path)
 
-# プレビュー用画像（LINE仕様に合わせて軽量JPEGで作成）
+# プレビュー用画像
 preview_path = "kaitori_preview.jpg"
 with Image.open(output_path) as img:
     img_preview = img.copy()
@@ -128,7 +129,7 @@ with Image.open(output_path) as img:
     img_preview.convert("RGB").save(preview_path, "JPEG", quality=75)
 
 # ----------------------------------------------------
-# 5. LINE対応画像アップロード（Freeimage API・直接参照CDN）
+# 5. LINE対応画像アップロード（Freeimage API）
 # ----------------------------------------------------
 def upload_image(path):
     url = "https://freeimage.host/api/1/upload"
