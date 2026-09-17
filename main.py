@@ -19,7 +19,7 @@ if not all([GEMINI_KEY, LINE_TOKEN, LINE_USER]):
 client = genai.Client(api_key=GEMINI_KEY)
 
 # ----------------------------------------------------
-# 2. 画像読み込み & Gemini 抽出処理（マルチモデル・フォールバック）
+# 2. 画像読み込み & Gemini 抽出処理（正規モデル自動切替 & リトライ）
 # ----------------------------------------------------
 image_path = "sample.jpg"
 if not os.path.exists(image_path):
@@ -41,34 +41,42 @@ prompt = """
 ]
 """
 
-# 混雑時（503）に自動で切り替えるモデル候補リスト
+# APIが案内した正規の現行稼働モデル
 candidate_models = [
-    "gemini-2.5-flash",
-    "gemini-3-flash",
-    "gemini-2.5-pro",
-    "gemini-3.6-flash"
+    "gemini-3.6-flash",
+    "gemini-3.1-pro-preview"
 ]
 
 response = None
+
+# 各モデルに対してリトライをかけながら実行
 for model_name in candidate_models:
     print(f"Gemini API ({model_name}) へリクエスト中...")
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[image, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1
-            ),
-        )
-        print(f"✅ {model_name} での解析に成功しました！")
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[image, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
+                ),
+            )
+            print(f"✅ {model_name} で解析に成功しました！")
+            break
+        except Exception as e:
+            err_msg = str(e)
+            print(f"⚠️ {model_name} 試行{attempt + 1}/3 失敗: {err_msg[:120]}...")
+            if "503" in err_msg or "UNAVAILABLE" in err_msg:
+                # 混雑時は待機時間を延ばして再試行
+                time.sleep(5 * (attempt + 1))
+            else:
+                break
+    if response is not None:
         break
-    except Exception as e:
-        print(f"⚠️ {model_name} でエラー発生（混雑など）: {e}")
-        time.sleep(2)
 
 if response is None:
-    raise RuntimeError("利用可能なすべてのGeminiモデルが現在混雑しています。しばらく待って再実行してください。")
+    raise RuntimeError("モデルの混雑が継続しています。少し時間を空けて再実行してください。")
 
 raw_text = response.text.strip()
 print(f"--- Gemini 生レスポンス（先頭300文字） ---\n{raw_text[:300]}\n--------------------------")
