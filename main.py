@@ -35,17 +35,18 @@ prompt = """
 
 [
   {
-    "card_id": "型番（例: OP05-119）",
+    "card_id": "型番（例: OP05-119。画像内に記載がない場合はnull）",
     "card_name": "カード名（例: モンキー・D・ルフィ）",
-    "rarity": "仕様（例: コミパラ、SEC、パラレル、SRなど。不明なら空文字）",
+    "rarity": "仕様やレアリティ（例: コミパラ、金文字、SECなど。不明なら空文字）",
     "buy_price": 買取価格の数字（例: 120000 ※「円」や「,」は含めず整数で出力）
   }
 ]
 """
 
 print("Gemini APIへ画像を送信中...")
+# 推奨されている最新モデル gemini-3.6-flash を指定
 response = client.models.generate_content(
-    model="gemini-2.5-flash",
+    model="gemini-3.6-flash",
     contents=[image, prompt],
     config=types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -60,7 +61,6 @@ print("--------------------------")
 
 try:
     extracted_data = json.loads(raw_text)
-    # オブジェクトで返ってきた場合の対応
     if isinstance(extracted_data, dict):
         for v in extracted_data.values():
             if isinstance(v, list):
@@ -79,10 +79,16 @@ inventory_data = {"OP05-119": 1, "OP01-120": 6}
 calculated_results = []
 
 for item in extracted_data:
-    card_id = item.get("card_id") or item.get("id") or "-"
+    # 型番がNoneやnullの場合はハイフンに置き換え
+    raw_card_id = item.get("card_id")
+    if not raw_card_id or str(raw_card_id).strip().lower() == "none":
+        card_id = "-"
+    else:
+        card_id = str(raw_card_id).strip()
+
     card_name = item.get("card_name") or item.get("name") or "名称不明"
     
-    # 金額の抽出（文字列混じりでも数値化）
+    # 金額の数値化
     raw_price = item.get("buy_price") or item.get("price") or 0
     try:
         comp_price = int(str(raw_price).replace(",", "").replace("¥", "").replace("円", "").strip())
@@ -96,7 +102,7 @@ for item in extracted_data:
     final_price = int((comp_price * rate) // 10 * 10)
 
     calculated_results.append({
-        "card_id": str(card_id),
+        "card_id": card_id,
         "card_name": str(card_name),
         "rarity": item.get("rarity") or "",
         "my_price": final_price
@@ -132,7 +138,6 @@ draw.text((1030, table_y + 8), "状態", font=header_font, fill="#F8FAFC")
 # 各行の描画
 current_y = table_y + 55
 if not calculated_results:
-    # 抽出データが0件だった場合の警告表示
     draw.text((60, current_y + 20), "※読み取り可能なカードデータが見つかりませんでした", font=text_font, fill="#EF4444")
 else:
     for i, card in enumerate(calculated_results[:12]):
@@ -184,6 +189,7 @@ def upload_image(path):
 print("画像をCDNへアップロード中...")
 orig_url = upload_image(output_path)
 prev_url = upload_image(preview_path)
+print(f"画像URL取得成功:\n  元画像: {orig_url}\n  プレビュー: {prev_url}")
 
 # ----------------------------------------------------
 # 6. LINE Messaging API プッシュ送信
