@@ -1,0 +1,38 @@
+name: Daily Kaitori Bot
+
+on:
+  schedule:
+    # 毎日 日本時間 11:00 に実行（UTC時間では深夜 02:00）
+    - cron: '0 2 * * *'
+  # 手動テスト用の実行ボタンを有効化
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python環境のセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 日本語フォントのインストール
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-ipafont-gothic
+
+      - name: ライブラリのインストール
+        run: |
+          pip install -r requirements.txt
+
+      - name: スクリプト実行
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: |
+          python main.py
