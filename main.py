@@ -1,20 +1,29 @@
 import os
 import json
-import time
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
 from google.genai import types
 
-# 1. 環境変数の取得
+# ----------------------------------------------------
+# 1. 環境変数の取得（GitHub Secrets）
+# ----------------------------------------------------
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER = os.environ.get("LINE_USER_ID")
 
+if not all([GEMINI_KEY, LINE_TOKEN, LINE_USER]):
+    raise ValueError("必要な環境変数（シークレット）が設定されていません。")
+
 client = genai.Client(api_key=GEMINI_KEY)
 
-# 2. 画像読み込み & Gemini 抽出
+# ----------------------------------------------------
+# 2. 画像読み込み & Gemini 抽出処理
+# ----------------------------------------------------
 image_path = "sample.jpg"
+if not os.path.exists(image_path):
+    raise FileNotFoundError(f"'{image_path}' がリポジトリ内に見つかりません。画像をアップロードしてください。")
+
 image = Image.open(image_path)
 
 prompt = """
@@ -30,36 +39,20 @@ prompt = """
 ]
 """
 
-max_retries = 4
-retry_delay = 5
-response = None
-
-for attempt in range(max_retries):
-    try:
-        print(f"Gemini API 呼び出し中... (試行 {attempt + 1}/{max_retries})")
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=[image, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1
-            ),
-        )
-        print("API呼び出し成功")
-        break
-    except Exception as e:
-        print(f"APIエラー検出: {e}")
-        if attempt < max_retries - 1:
-            print(f"{retry_delay}秒待機して再試行します...")
-            time.sleep(retry_delay)
-            retry_delay *= 2
-        else:
-            raise e
-
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents=[image, prompt],
+    config=types.GenerateContentConfig(
+        response_mime_type="application/json",
+        temperature=0.1
+    ),
+)
 extracted_data = json.loads(response.text)
-print(f"抽出データ件数: {len(extracted_data)}件")
+print(f"カード抽出件数: {len(extracted_data)}件")
 
-# 3. 価格計算
+# ----------------------------------------------------
+# 3. 自社買取価格の計算
+# ----------------------------------------------------
 inventory_data = {"OP05-119": 1, "OP01-120": 6}
 calculated_results = []
 
@@ -68,6 +61,7 @@ for item in extracted_data:
     comp_price = item.get("buy_price", 0)
     stock = inventory_data.get(card_id, 3)
 
+    # 在庫に応じた掛け率（在庫薄:100%、過多:80%、通常:90%）
     rate = 1.0 if stock <= 1 else (0.8 if stock >= 5 else 0.9)
     final_price = int((comp_price * rate) // 10 * 10)
 
@@ -78,7 +72,9 @@ for item in extracted_data:
         "my_price": final_price
     })
 
-# 4. 買取表画像生成
+# ----------------------------------------------------
+# 4. 買取表画像の生成（Pillow）
+# ----------------------------------------------------
 img_w, img_h = 1200, 900
 base_img = Image.new("RGB", (img_w, img_h), color="#0F172A")
 draw = ImageDraw.Draw(base_img)
@@ -89,11 +85,13 @@ header_font = ImageFont.truetype(font_path, 26)
 text_font = ImageFont.truetype(font_path, 24)
 price_font = ImageFont.truetype(font_path, 28)
 
+# ヘッダー描画
 draw.rectangle([0, 0, img_w, 120], fill="#1E293B")
 draw.rectangle([0, 115, img_w, 120], fill="#E11D48")
 draw.text((40, 25), "【池袋店】ワンピースカード 強化買取表", font=title_font, fill="#FFFFFF")
 draw.text((40, 80), "※相場・在庫状況により変動する場合があります", font=header_font, fill="#94A3B8")
 
+# テーブルヘッダー
 table_y = 150
 draw.rectangle([40, table_y, img_w - 40, table_y + 45], fill="#334155")
 draw.text((60, table_y + 8), "型番", font=header_font, fill="#F8FAFC")
@@ -101,6 +99,7 @@ draw.text((240, table_y + 8), "カード名 / 仕様", font=header_font, fill="#
 draw.text((820, table_y + 8), "自社買取価格", font=header_font, fill="#FDE047")
 draw.text((1030, table_y + 8), "状態", font=header_font, fill="#F8FAFC")
 
+# 各行の描画
 current_y = table_y + 55
 for i, card in enumerate(calculated_results[:12]):
     row_bg = "#1E293B" if i % 2 == 0 else "#0F172A"
@@ -113,52 +112,75 @@ for i, card in enumerate(calculated_results[:12]):
     draw.text((1030, current_y + 12), "美品", font=text_font, fill="#94A3B8")
     current_y += 52
 
+# フッター
+draw.rectangle([0, img_h - 60, img_w, img_h], fill="#1E293B")
+draw.text((40, img_h - 45), "池袋トレカ専門店 | 営業時間 11:00-21:00", font=header_font, fill="#CBD5E1")
+
+# メイン画像保存
 output_path = "kaitori_output.png"
 base_img.save(output_path)
 
-# 5. LINEサーバーへ直接バイナリ送信（外部アップローダー・Imgur不要）
-# メッセージ枠の作成
-push_url = "https://api.line.me/v2/bot/message/push"
-headers = {
-    "Authorization": f"Bearer {LINE_TOKEN}",
-    "Content-Type": "application/json"
-}
+# プレビュー用画像（LINE仕様に合わせて軽量JPEGで作成）
+preview_path = "kaitori_preview.jpg"
+with Image.open(output_path) as img:
+    img_preview = img.copy()
+    img_preview.thumbnail((800, 800))
+    img_preview.convert("RGB").save(preview_path, "JPEG", quality=75)
 
-# まず案内テキストを送信
-text_payload = {
+# ----------------------------------------------------
+# 5. LINE対応画像アップロード（Freeimage API・直接参照CDN）
+# ----------------------------------------------------
+def upload_image(path):
+    url = "https://freeimage.host/api/1/upload"
+    data = {
+        "key": "6d207e02198a847aa98d0a2a901485a5",
+        "action": "upload",
+        "format": "json"
+    }
+    with open(path, "rb") as f:
+        res = requests.post(url, data=data, files={"source": f})
+    
+    res_data = res.json()
+    if res.status_code == 200 and "image" in res_data:
+        return res_data["image"]["url"]
+    else:
+        raise Exception(f"画像アップロード失敗: {res.text}")
+
+print("画像をCDNへアップロード中...")
+orig_url = upload_image(output_path)
+prev_url = upload_image(preview_path)
+print(f"画像URL取得成功:\n  元画像: {orig_url}\n  プレビュー: {prev_url}")
+
+# ----------------------------------------------------
+# 6. LINE Messaging API プッシュ送信
+# ----------------------------------------------------
+line_headers = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {LINE_TOKEN}"
+}
+payload = {
     "to": LINE_USER,
     "messages": [
-        {"type": "text", "text": "【自動買取表生成】\n本日の買取表が完成しました。画像を生成して送信します。"}
+        {
+            "type": "text", 
+            "text": "【自動買取表生成】\n本日の買取表が完成しました。画像をタップして確認してください。"
+        },
+        {
+            "type": "image", 
+            "originalContentUrl": orig_url, 
+            "previewImageUrl": prev_url
+        },
+        {
+            "type": "text", 
+            "text": "画像を長押し保存してXへポストしてください。"
+        }
     ]
 }
-requests.post(push_url, headers=headers, json=text_payload)
 
-# 画像バイナリをLINEのコンテンツ送信API（blob）へ直接アップロード
-upload_url = "https://api-data.line.me/v2/bot/message/push"
-# LINEの画像受信用一時ホストへダイレクト送信するため、tmpfilesのダイレクトリンクを利用（Imgur制限回避）
-with open(output_path, "rb") as f:
-    up_res = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f})
+res_line = requests.post("https://api.line.me/v2/bot/message/push", headers=line_headers, json=payload)
 
-if up_res.status_code == 200:
-    dl_url = up_res.json()["data"]["url"].replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
-    img_payload = {
-        "to": LINE_USER,
-        "messages": [
-            {
-                "type": "image",
-                "originalContentUrl": dl_url,
-                "previewImageUrl": dl_url
-            },
-            {
-                "type": "text",
-                "text": "画像を保存してXへポストしてください。"
-            }
-        ]
-    }
-    line_res = requests.post(push_url, headers=headers, json=img_payload)
-    if line_res.status_code == 200:
-        print("LINE送信完了")
-    else:
-        print(f"LINE画像送信エラー: {line_res.text}")
+if res_line.status_code == 200:
+    print("✅ LINEへの画像プッシュ送信が完了しました！")
 else:
-    print(f"アップロード失敗: {up_res.text}")
+    print(f"❌ LINE送信エラー（ステータスコード: {res_line.status_code}）")
+    print(res_line.text)
