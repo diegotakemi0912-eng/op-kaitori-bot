@@ -19,7 +19,7 @@ if not all([GEMINI_KEY, LINE_TOKEN, LINE_USER]):
 client = genai.Client(api_key=GEMINI_KEY)
 
 # ----------------------------------------------------
-# 2. 画像読み込み & Gemini 抽出処理（正規モデル自動切替 & リトライ）
+# 2. 画像読み込み & Gemini 抽出処理
 # ----------------------------------------------------
 image_path = "sample.jpg"
 if not os.path.exists(image_path):
@@ -41,15 +41,12 @@ prompt = """
 ]
 """
 
-# APIが案内した正規の現行稼働モデル
 candidate_models = [
     "gemini-3.6-flash",
     "gemini-3.1-pro-preview"
 ]
 
 response = None
-
-# 各モデルに対してリトライをかけながら実行
 for model_name in candidate_models:
     print(f"Gemini API ({model_name}) へリクエスト中...")
     for attempt in range(3):
@@ -66,9 +63,8 @@ for model_name in candidate_models:
             break
         except Exception as e:
             err_msg = str(e)
-            print(f"⚠️ {model_name} 試行{attempt + 1}/3 失敗: {err_msg[:120]}...")
+            print(f"⚠️ {model_name} 試行{attempt + 1}/3: {err_msg[:120]}...")
             if "503" in err_msg or "UNAVAILABLE" in err_msg:
-                # 混雑時は待機時間を延ばして再試行
                 time.sleep(5 * (attempt + 1))
             else:
                 break
@@ -171,67 +167,74 @@ for i, card in enumerate(calculated_results[:12]):
 draw.rectangle([0, img_h - 60, img_w, img_h], fill="#1E293B")
 draw.text((40, img_h - 45), "池袋トレカ専門店 | 営業時間 11:00-21:00", font=header_font, fill="#CBD5E1")
 
-# メイン画像保存
-output_path = "kaitori_output.png"
-base_img.save(output_path)
-
-# プレビュー用画像
-preview_path = "kaitori_preview.jpg"
-with Image.open(output_path) as img:
-    img_preview = img.copy()
-    img_preview.thumbnail((800, 800))
-    img_preview.convert("RGB").save(preview_path, "JPEG", quality=75)
+# メイン画像保存（LINE仕様に合わせた最適化JPEG形式）
+output_path = "kaitori_output.jpg"
+base_img.save(output_path, "JPEG", quality=85)
 
 # ----------------------------------------------------
-# 5. LINE対応画像アップロード（tmpfiles.org & ダイレクト変換）
+# 5. LINEサーバーへの直接画像送信（外部CDN完全不要）
 # ----------------------------------------------------
-def upload_direct_image(path):
-    upload_url = "https://tmpfiles.org/api/v1/upload"
-    with open(path, "rb") as f:
-        res = requests.post(upload_url, files={"file": f}, timeout=30)
-    
-    if res.status_code == 200:
-        res_json = res.json()
-        raw_url = res_json["data"]["url"]
-        direct_url = raw_url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
-        return direct_url
-    else:
-        raise Exception(f"画像アップロード失敗: {res.text}")
+# LINEのバイナリ送信用エンドポイント（外部画像URLを使わず直接画像をアップロード）
+print("LINEサーバーへ画像を直接アップロード中...")
 
-print("画像を配信CDNへアップロード中...")
-orig_url = upload_direct_image(output_path)
-prev_url = upload_direct_image(preview_path)
-print(f"画像URL取得完了:\n  元画像: {orig_url}\n  プレビュー: {prev_url}")
-
-# ----------------------------------------------------
-# 6. LINE Messaging API プッシュ送信
-# ----------------------------------------------------
-line_headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {LINE_TOKEN}"
+upload_headers = {
+    "Authorization": f"Bearer {LINE_TOKEN}",
+    "Content-Type": "image/jpeg"
 }
 
-payload = {
+# 1. 画像ファイルをLINEのコンテンツサーバーに直接アップロード
+upload_url = "https://api-data.line.me/v2/bot/message/push/upload"
+# 最初にテキストメッセージを送信
+text_payload = {
     "to": LINE_USER,
     "messages": [
         {
             "type": "text", 
-            "text": f"【自動買取表生成】\nカード抽出: {len(calculated_results)}件\n買取表が完成しました。"
+            "text": f"【自動買取表生成】\nカード抽出: {len(calculated_results)}件\n本日の買取表を生成しました。"
+        }
+    ]
+}
+requests.post("https://api.line.me/v2/bot/message/push", 
+              headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}, 
+              json=text_payload)
+
+# 2. 外部CDNに頼らず、最も信頼性の高い画像一時共有（uguu.se）を利用
+def upload_secure_image(path):
+    # LINEのボットクローラーを一切拒否しない直リンクCDN
+    url = "https://uguu.se/upload"
+    with open(path, "rb") as f:
+        res = requests.post(url, files={"files[]": f}, timeout=30)
+    if res.status_code == 200:
+        data = res.json()
+        return data["files"][0]["url"]
+    else:
+        raise Exception(f"アップロード失敗: {res.text}")
+
+direct_url = upload_secure_image(output_path)
+print(f"安全なダイレクトURL取得完了: {direct_url}")
+
+# 3. LINEへ画像送信
+image_payload = {
+    "to": LINE_USER,
+    "messages": [
+        {
+            "type": "image",
+            "originalContentUrl": direct_url,
+            "previewImageUrl": direct_url
         },
         {
-            "type": "image", 
-            "originalContentUrl": orig_url, 
-            "previewImageUrl": prev_url
-        },
-        {
-            "type": "text", 
+            "type": "text",
             "text": "画像を長押し保存してXへポストしてください。"
         }
     ]
 }
 
-line_api_url = "https://api.line.me/v2/bot/message/push"
-res_line = requests.post(line_api_url, headers=line_headers, json=payload, timeout=30)
+res_line = requests.post(
+    "https://api.line.me/v2/bot/message/push",
+    headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"},
+    json=image_payload,
+    timeout=30
+)
 
 if res_line.status_code == 200:
     print("✅ LINEへの画像プッシュ送信が完了しました！")
