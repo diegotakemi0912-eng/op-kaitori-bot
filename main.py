@@ -2,6 +2,7 @@ import os
 import json
 import time
 import requests
+from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
 from google.genai import types
@@ -19,14 +20,61 @@ if not all([GEMINI_KEY, LINE_TOKEN, LINE_USER]):
 client = genai.Client(api_key=GEMINI_KEY)
 
 # ----------------------------------------------------
-# 2. 画像読み込み & Gemini 抽出処理（429クォータ回復対応）
+# 2. 競合Xアカウントから最新買取表画像を自動収集
 # ----------------------------------------------------
+# 監視対象のXアカウントID（@を除いたID）
+TARGET_X_USER = "raftel_ikebukuro" 
 image_path = "sample.jpg"
-if not os.path.exists(image_path):
-    raise FileNotFoundError(f"'{image_path}' が見つかりません。画像をアップロードしてください。")
+
+def fetch_latest_x_image(screen_name, save_path):
+    print(f"Xアカウント (@{screen_name}) から最新の買取画像を探索中...")
+    
+    # 公開Syndication APIエンドポイントから最新タイムラインを取得
+    syndication_url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{screen_name}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+    
+    try:
+        res = requests.get(syndication_url, headers=headers, timeout=20)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            data_script = soup.find("script", id="__NEXT_DATA__")
+            if data_script:
+                json_data = json.loads(data_script.string)
+                entries = json_data.get("props", {}).get("pageProps", {}).get("timeline", {}).get("entries", [])
+                
+                for entry in entries:
+                    tweet = entry.get("content", {}).get("tweet", {})
+                    # 画像メディアの探索
+                    media_list = tweet.get("entities", {}).get("media", [])
+                    if media_list:
+                        img_url = media_list[0].get("media_url_https")
+                        if img_url:
+                            # 最高画質でダウンロード
+                            full_quality_url = f"{img_url}?format=jpg&name=large"
+                            img_data = requests.get(full_quality_url, headers=headers, timeout=20).content
+                            with open(save_path, "wb") as f:
+                                f.write(img_data)
+                            print(f"✅ 最新画像を自動ダウンロードしました: {full_quality_url}")
+                            return True
+    except Exception as e:
+        print(f"⚠️ X画像自動取得でエラー発生: {e}")
+
+    # 取得に失敗した、または投稿画像がない場合はリポジトリ内の既存ファイルを利用
+    if os.path.exists(save_path):
+        print("⚠️ 最新画像の自動取得をスキップし、既存のローカル画像を使用します。")
+        return True
+    return False
+
+if not fetch_latest_x_image(TARGET_X_USER, image_path):
+    raise FileNotFoundError("買取表画像を取得できませんでした。リポジトリ内に sample.jpg を配置するか設定を確認してください。")
 
 image = Image.open(image_path)
 
+# ----------------------------------------------------
+# 3. Gemini によるカード情報抽出
+# ----------------------------------------------------
 prompt = """
 添付された買取表画像から、掲載されているカードの情報をすべて抽出してください。
 以下のJSONフォーマット（配列形式）で出力してください。余計な解説文は不要です。
@@ -63,10 +111,9 @@ for model_name in candidate_models:
             break
         except Exception as e:
             err_msg = str(e)
-            print(f"⚠️ {model_name} 試行{attempt + 1}/3 失敗: {err_msg[:120]}...")
+            print(f"⚠️ {model_name} 試行{attempt + 1}/3: {err_msg[:120]}...")
             if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                # クォータ（1分間あたりの回数制限）リセットを待つため30秒待機
-                print("⏳ 429レート制限を検知。制限解除のため30秒待機します...")
+                print("⏳ 429レート制限を検知。30秒待機します...")
                 time.sleep(30)
             elif "503" in err_msg or "UNAVAILABLE" in err_msg:
                 time.sleep(5 * (attempt + 1))
@@ -76,7 +123,7 @@ for model_name in candidate_models:
         break
 
 if response is None:
-    raise RuntimeError("APIの利用制限または混雑が継続しています。数分〜数十分後に再実行してください。")
+    raise RuntimeError("モデルの混雑・制限が継続しています。時間をおいて再実行してください。")
 
 raw_text = response.text.strip()
 print(f"--- Gemini 生レスポンス（先頭300文字） ---\n{raw_text[:300]}\n--------------------------")
@@ -95,9 +142,8 @@ except Exception as e:
 print(f"カード抽出件数: {len(extracted_data)}件")
 
 # ----------------------------------------------------
-# 3. 自社買取価格の計算
+# 4. 自社買取価格の計算（掛け率: 100% 同額マッチ）
 # ----------------------------------------------------
-inventory_data = {"OP05-119": 1, "OP01-120": 6}
 calculated_results = []
 
 for item in extracted_data:
@@ -115,8 +161,8 @@ for item in extracted_data:
     except:
         comp_price = 0
 
-    stock = inventory_data.get(card_id, 3)
-    rate = 1.0 if stock <= 1 else (0.8 if stock >= 5 else 0.9)
+    # 掛け率を1.0（100% 同額）に設定
+    rate = 1.0
     final_price = int((comp_price * rate) // 10 * 10)
 
     calculated_results.append({
@@ -127,7 +173,7 @@ for item in extracted_data:
     })
 
 # ----------------------------------------------------
-# 4. 買取表画像の生成（Pillow）
+# 5. 買取表画像の生成（Pillow）
 # ----------------------------------------------------
 img_w, img_h = 1200, 900
 base_img = Image.new("RGB", (img_w, img_h), color="#0F172A")
@@ -176,7 +222,7 @@ output_path = "kaitori_output.jpg"
 base_img.save(output_path, "JPEG", quality=85)
 
 # ----------------------------------------------------
-# 5. LINE対応画像アップロード & 送信
+# 6. LINE対応画像アップロード & 送信
 # ----------------------------------------------------
 def upload_secure_image(path):
     url = "https://uguu.se/upload"
@@ -192,7 +238,6 @@ print("画像を配信CDNへアップロード中...")
 direct_url = upload_secure_image(output_path)
 print(f"画像URL取得完了: {direct_url}")
 
-# LINEプッシュ送信
 line_headers = {
     "Content-Type": "application/json",
     "Authorization": f"Bearer {LINE_TOKEN}"
@@ -202,7 +247,7 @@ payload = {
     "messages": [
         {
             "type": "text", 
-            "text": f"【自動買取表生成】\nカード抽出: {len(calculated_results)}件\n買取表が完成しました。"
+            "text": f"【自動買取表生成】\nカード抽出: {len(calculated_results)}件\n掛け率100%（同額マッチ）で買取表を作成しました。"
         },
         {
             "type": "image", 
