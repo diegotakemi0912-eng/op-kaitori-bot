@@ -19,7 +19,7 @@ if not all([GEMINI_KEY, LINE_TOKEN, LINE_USER]):
 client = genai.Client(api_key=GEMINI_KEY)
 
 # ----------------------------------------------------
-# 2. 画像読み込み & Gemini 抽出処理（リトライ機能付き）
+# 2. 画像読み込み & Gemini 抽出処理（マルチモデル・フォールバック）
 # ----------------------------------------------------
 image_path = "sample.jpg"
 if not os.path.exists(image_path):
@@ -41,29 +41,34 @@ prompt = """
 ]
 """
 
-print("Gemini APIへ画像を送信中...")
+# 混雑時（503）に自動で切り替えるモデル候補リスト
+candidate_models = [
+    "gemini-2.5-flash",
+    "gemini-3-flash",
+    "gemini-2.5-pro",
+    "gemini-3.6-flash"
+]
 
-# 503混雑エラー対策：最大4回まで自動再試行
-max_retries = 4
 response = None
-
-for attempt in range(max_retries):
+for model_name in candidate_models:
+    print(f"Gemini API ({model_name}) へリクエスト中...")
     try:
         response = client.models.generate_content(
-            model="gemini-3.6-flash",
+            model=model_name,
             contents=[image, prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1
             ),
         )
+        print(f"✅ {model_name} での解析に成功しました！")
         break
     except Exception as e:
-        print(f"呼び出し待機中 (試行 {attempt + 1}/{max_retries}): {e}")
-        if attempt < max_retries - 1:
-            time.sleep(5 * (attempt + 1))  # 5秒、10秒、15秒と待機時間を延ばして再試行
-        else:
-            raise e
+        print(f"⚠️ {model_name} でエラー発生（混雑など）: {e}")
+        time.sleep(2)
+
+if response is None:
+    raise RuntimeError("利用可能なすべてのGeminiモデルが現在混雑しています。しばらく待って再実行してください。")
 
 raw_text = response.text.strip()
 print(f"--- Gemini 生レスポンス（先頭300文字） ---\n{raw_text[:300]}\n--------------------------")
