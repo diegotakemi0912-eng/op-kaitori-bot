@@ -1,16 +1,18 @@
 import os
 import json
+import subprocess
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
 from google.genai import types
 
 # ----------------------------------------------------
-# 1. 環境変数の取得（GitHub Secrets）
+# 1. 環境変数の取得（GitHub Secrets & リポジトリ情報）
 # ----------------------------------------------------
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER = os.environ.get("LINE_USER_ID")
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")  # 例: user/op-kaitori-bot
 
 if not all([GEMINI_KEY, LINE_TOKEN, LINE_USER]):
     raise ValueError("必要な環境変数（シークレット）が設定されていません。")
@@ -44,7 +46,6 @@ prompt = """
 """
 
 print("Gemini APIへ画像を送信中...")
-# 推奨されている最新モデル gemini-3.6-flash を指定
 response = client.models.generate_content(
     model="gemini-3.6-flash",
     contents=[image, prompt],
@@ -55,9 +56,7 @@ response = client.models.generate_content(
 )
 
 raw_text = response.text.strip()
-print("--- Gemini 生レスポンス ---")
-print(raw_text)
-print("--------------------------")
+print(f"--- Gemini 生レスポンス（先頭300文字） ---\n{raw_text[:300]}\n--------------------------")
 
 try:
     extracted_data = json.loads(raw_text)
@@ -79,7 +78,6 @@ inventory_data = {"OP05-119": 1, "OP01-120": 6}
 calculated_results = []
 
 for item in extracted_data:
-    # 型番がNoneやnullの場合はハイフンに置き換え
     raw_card_id = item.get("card_id")
     if not raw_card_id or str(raw_card_id).strip().lower() == "none":
         card_id = "-"
@@ -88,7 +86,6 @@ for item in extracted_data:
 
     card_name = item.get("card_name") or item.get("name") or "名称不明"
     
-    # 金額の数値化
     raw_price = item.get("buy_price") or item.get("price") or 0
     try:
         comp_price = int(str(raw_price).replace(",", "").replace("¥", "").replace("円", "").strip())
@@ -96,8 +93,6 @@ for item in extracted_data:
         comp_price = 0
 
     stock = inventory_data.get(card_id, 3)
-
-    # 在庫に応じた掛け率（在庫薄:100%、過多:80%、通常:90%）
     rate = 1.0 if stock <= 1 else (0.8 if stock >= 5 else 0.9)
     final_price = int((comp_price * rate) // 10 * 10)
 
@@ -121,7 +116,7 @@ header_font = ImageFont.truetype(font_path, 26)
 text_font = ImageFont.truetype(font_path, 24)
 price_font = ImageFont.truetype(font_path, 28)
 
-# ヘッダー描画
+# ヘッダー
 draw.rectangle([0, 0, img_w, 120], fill="#1E293B")
 draw.rectangle([0, 115, img_w, 120], fill="#E11D48")
 draw.text((40, 25), "【池袋店】ワンピースカード 強化買取表", font=title_font, fill="#FFFFFF")
@@ -137,20 +132,17 @@ draw.text((1030, table_y + 8), "状態", font=header_font, fill="#F8FAFC")
 
 # 各行の描画
 current_y = table_y + 55
-if not calculated_results:
-    draw.text((60, current_y + 20), "※読み取り可能なカードデータが見つかりませんでした", font=text_font, fill="#EF4444")
-else:
-    for i, card in enumerate(calculated_results[:12]):
-        row_bg = "#1E293B" if i % 2 == 0 else "#0F172A"
-        draw.rectangle([40, current_y, img_w - 40, current_y + 52], fill=row_bg)
-        draw.text((60, current_y + 12), card["card_id"], font=text_font, fill="#38BDF8")
-        
-        rarity_str = f" [{card['rarity']}]" if card["rarity"] else ""
-        full_name = f"{card['card_name']}{rarity_str}"
-        draw.text((240, current_y + 12), full_name[:26], font=text_font, fill="#FFFFFF")
-        draw.text((820, current_y + 10), f"¥{card['my_price']:,}", font=price_font, fill="#FACC15")
-        draw.text((1030, current_y + 12), "美品", font=text_font, fill="#94A3B8")
-        current_y += 52
+for i, card in enumerate(calculated_results[:12]):
+    row_bg = "#1E293B" if i % 2 == 0 else "#0F172A"
+    draw.rectangle([40, current_y, img_w - 40, current_y + 52], fill=row_bg)
+    draw.text((60, current_y + 12), card["card_id"], font=text_font, fill="#38BDF8")
+    
+    rarity_str = f" [{card['rarity']}]" if card["rarity"] else ""
+    full_name = f"{card['card_name']}{rarity_str}"
+    draw.text((240, current_y + 12), full_name[:26], font=text_font, fill="#FFFFFF")
+    draw.text((820, current_y + 10), f"¥{card['my_price']:,}", font=price_font, fill="#FACC15")
+    draw.text((1030, current_y + 12), "美品", font=text_font, fill="#94A3B8")
+    current_y += 52
 
 # フッター
 draw.rectangle([0, img_h - 60, img_w, img_h], fill="#1E293B")
@@ -168,28 +160,21 @@ with Image.open(output_path) as img:
     img_preview.convert("RGB").save(preview_path, "JPEG", quality=75)
 
 # ----------------------------------------------------
-# 5. LINE対応画像アップロード（Freeimage API）
+# 5. 生成画像をGitHubリポジトリへ自動コミット & URL生成
 # ----------------------------------------------------
-def upload_image(path):
-    url = "[https://freeimage.host/api/1/upload](https://freeimage.host/api/1/upload)"
-    data = {
-        "key": "6d207e02198a847aa98d0a2a901485a5",
-        "action": "upload",
-        "format": "json"
-    }
-    with open(path, "rb") as f:
-        res = requests.post(url, data=data, files={"source": f})
-    
-    res_data = res.json()
-    if res.status_code == 200 and "image" in res_data:
-        return res_data["image"]["url"]
-    else:
-        raise Exception(f"画像アップロード失敗: {res.text}")
+print("生成画像をGitHubに保存中...")
+subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
+subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
+subprocess.run(["git", "add", output_path, preview_path], check=True)
+# 変更がある場合のみコミット
+subprocess.run(["git", "commit", "-m", "update generated kaitori images [skip ci]"], check=False)
+subprocess.run(["git", "push"], check=False)
 
-print("画像をCDNへアップロード中...")
-orig_url = upload_image(output_path)
-prev_url = upload_image(preview_path)
-print(f"画像URL取得成功:\n  元画像: {orig_url}\n  プレビュー: {prev_url}")
+# GitHub RawのダイレクトURL（安定したCDN配信）
+raw_base = f"[https://raw.githubusercontent.com/](https://raw.githubusercontent.com/){GITHUB_REPOSITORY}/main"
+orig_url = f"{raw_base}/{output_path}"
+prev_url = f"{raw_base}/{preview_path}"
+print(f"画像URL生成完了:\n  元画像: {orig_url}\n  プレビュー: {prev_url}")
 
 # ----------------------------------------------------
 # 6. LINE Messaging API プッシュ送信
@@ -203,7 +188,7 @@ payload = {
     "messages": [
         {
             "type": "text", 
-            "text": f"【自動買取表生成】\nカード抽出: {len(calculated_results)}件\n画像をタップして確認してください。"
+            "text": f"【自動買取表生成】\nカード抽出: {len(calculated_results)}件\n買取表が完成しました。"
         },
         {
             "type": "image", 
