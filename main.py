@@ -1,18 +1,16 @@
 import os
 import json
-import subprocess
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
 from google.genai import types
 
 # ----------------------------------------------------
-# 1. 環境変数の取得（GitHub Secrets & リポジトリ情報）
+# 1. 環境変数の取得（GitHub Secrets）
 # ----------------------------------------------------
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER = os.environ.get("LINE_USER_ID")
-GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")  # 例: user/op-kaitori-bot
 
 if not all([GEMINI_KEY, LINE_TOKEN, LINE_USER]):
     raise ValueError("必要な環境変数（シークレット）が設定されていません。")
@@ -24,23 +22,20 @@ client = genai.Client(api_key=GEMINI_KEY)
 # ----------------------------------------------------
 image_path = "sample.jpg"
 if not os.path.exists(image_path):
-    raise FileNotFoundError(f"'{image_path}' がリポジトリ内に見つかりません。画像をアップロードしてください。")
+    raise FileNotFoundError(f"'{image_path}' が見つかりません。画像をアップロードしてください。")
 
 image = Image.open(image_path)
 
 prompt = """
-あなたはワンピースカード専門店の査定スタッフです。
-添付された買取表画像から、すべてのカードデータを漏れなく読み取ってください。
-
-必ず以下のJSON配列フォーマットのみを出力してください。
-マークダウン記法（```json など）や前後の挨拶文は一切含めないでください。
+添付された買取表画像から、掲載されているカードの情報をすべて抽出してください。
+以下のJSONフォーマット（配列形式）で出力してください。余計な解説文は不要です。
 
 [
   {
     "card_id": "型番（例: OP05-119。画像内に記載がない場合はnull）",
-    "card_name": "カード名（例: モンキー・D・ルフィ）",
+    "card_name": "カード名",
     "rarity": "仕様やレアリティ（例: コミパラ、金文字、SECなど。不明なら空文字）",
-    "buy_price": 買取価格の数字（例: 120000 ※「円」や「,」は含めず整数で出力）
+    "buy_price": 買取価格の数字（例: 120000 ※整数で出力）
   }
 ]
 """
@@ -160,21 +155,29 @@ with Image.open(output_path) as img:
     img_preview.convert("RGB").save(preview_path, "JPEG", quality=75)
 
 # ----------------------------------------------------
-# 5. 生成画像をGitHubリポジトリへ自動コミット & URL生成
+# 5. LINE対応ダイレクトURL生成（Oshi.at CDN・登録不要・直リンク保証）
 # ----------------------------------------------------
-print("生成画像をGitHubに保存中...")
-subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
-subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
-subprocess.run(["git", "add", output_path, preview_path], check=True)
-# 変更がある場合のみコミット
-subprocess.run(["git", "commit", "-m", "update generated kaitori images [skip ci]"], check=False)
-subprocess.run(["git", "push"], check=False)
+def upload_direct(path):
+    # LINEサーバーが確実に直接ダウンロードできる高速ホスティング
+    upload_endpoint = "https://oshi.at"
+    with open(path, "rb") as f:
+        res = requests.post(upload_endpoint, files={"f": f})
+    
+    if res.status_code == 200:
+        lines = res.text.strip().split("\n")
+        # 直接画像URL行を取得
+        for line in lines:
+            line_str = line.strip()
+            if line_str.startswith("https://") and ("/d/" in line_str or line_str.endswith((".png", ".jpg"))):
+                return line_str
+        return lines[0].strip()
+    else:
+        raise Exception(f"アップロードエラー: {res.text}")
 
-# GitHub RawのダイレクトURL（安定したCDN配信）
-raw_base = f"[https://raw.githubusercontent.com/](https://raw.githubusercontent.com/){GITHUB_REPOSITORY}/main"
-orig_url = f"{raw_base}/{output_path}"
-prev_url = f"{raw_base}/{preview_path}"
-print(f"画像URL生成完了:\n  元画像: {orig_url}\n  プレビュー: {prev_url}")
+print("画像を配信CDNへアップロード中...")
+orig_url = upload_direct(output_path)
+prev_url = upload_direct(preview_path)
+print(f"画像URL取得完了:\n  元画像: {orig_url}\n  プレビュー: {prev_url}")
 
 # ----------------------------------------------------
 # 6. LINE Messaging API プッシュ送信
@@ -183,6 +186,7 @@ line_headers = {
     "Content-Type": "application/json",
     "Authorization": f"Bearer {LINE_TOKEN}"
 }
+
 payload = {
     "to": LINE_USER,
     "messages": [
@@ -202,7 +206,8 @@ payload = {
     ]
 }
 
-res_line = requests.post("[https://api.line.me/v2/bot/message/push](https://api.line.me/v2/bot/message/push)", headers=line_headers, json=payload)
+line_api_url = "https://api.line.me/v2/bot/message/push"
+res_line = requests.post(line_api_url, headers=line_headers, json=payload)
 
 if res_line.status_code == 200:
     print("✅ LINEへの画像プッシュ送信が完了しました！")
