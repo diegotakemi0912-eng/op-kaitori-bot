@@ -1,4 +1,4 @@
 google-genai
 pillow
 requests
-playwright
+beautifulsoup4
