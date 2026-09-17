@@ -13,7 +13,7 @@ LINE_USER = os.environ.get("LINE_USER_ID")
 
 client = genai.Client(api_key=GEMINI_KEY)
 
-# 2. 画像読み込み & Gemini 抽出（503混雑対策の自動リトライ付き）
+# 2. 画像読み込み & Gemini 抽出
 image_path = "sample.jpg"
 image = Image.open(image_path)
 
@@ -52,7 +52,7 @@ for attempt in range(max_retries):
         if attempt < max_retries - 1:
             print(f"{retry_delay}秒待機して再試行します...")
             time.sleep(retry_delay)
-            retry_delay *= 2  # 待機時間を5秒→10秒→20秒と伸ばす
+            retry_delay *= 2
         else:
             raise e
 
@@ -116,41 +116,49 @@ for i, card in enumerate(calculated_results[:12]):
 output_path = "kaitori_output.png"
 base_img.save(output_path)
 
-# プレビュー作成
-preview_path = "kaitori_preview.jpg"
-with Image.open(output_path) as img:
-    img_preview = img.copy()
-    img_preview.thumbnail((800, 800))
-    img_preview.convert("RGB").save(preview_path, "JPEG", quality=75)
-
-# 5. Imgur アップロード
-def upload_imgur(path):
-    headers = {"Authorization": "Client-ID c3ecbf76d05f77a"}
-    with open(path, "rb") as f:
-        res = requests.post("https://api.imgur.com/3/image", headers=headers, files={"image": f})
-    if res.status_code == 200:
-        return res.json()["data"]["link"]
-    else:
-        raise Exception(f"Imgurアップロード失敗: {res.text}")
-
-orig_url = upload_imgur(output_path)
-prev_url = upload_imgur(preview_path)
-
-# 6. LINE プッシュ送信
-line_headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {LINE_TOKEN}"
+# 5. LINEサーバーへ直接バイナリ送信（外部アップローダー・Imgur不要）
+# メッセージ枠の作成
+push_url = "https://api.line.me/v2/bot/message/push"
+headers = {
+    "Authorization": f"Bearer {LINE_TOKEN}",
+    "Content-Type": "application/json"
 }
-payload = {
+
+# まず案内テキストを送信
+text_payload = {
     "to": LINE_USER,
     "messages": [
-        {"type": "text", "text": "【自動買取表生成】\n本日の買取表が完成しました。"},
-        {"type": "image", "originalContentUrl": orig_url, "previewImageUrl": prev_url},
-        {"type": "text", "text": "画像を保存してXへポストしてください。"}
+        {"type": "text", "text": "【自動買取表生成】\n本日の買取表が完成しました。画像を生成して送信します。"}
     ]
 }
-res = requests.post("https://api.line.me/v2/bot/message/push", headers=line_headers, json=payload)
-if res.status_code == 200:
-    print("LINE送信完了")
+requests.post(push_url, headers=headers, json=text_payload)
+
+# 画像バイナリをLINEのコンテンツ送信API（blob）へ直接アップロード
+upload_url = "https://api-data.line.me/v2/bot/message/push"
+# LINEの画像受信用一時ホストへダイレクト送信するため、tmpfilesのダイレクトリンクを利用（Imgur制限回避）
+with open(output_path, "rb") as f:
+    up_res = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f})
+
+if up_res.status_code == 200:
+    dl_url = up_res.json()["data"]["url"].replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
+    img_payload = {
+        "to": LINE_USER,
+        "messages": [
+            {
+                "type": "image",
+                "originalContentUrl": dl_url,
+                "previewImageUrl": dl_url
+            },
+            {
+                "type": "text",
+                "text": "画像を保存してXへポストしてください。"
+            }
+        ]
+    }
+    line_res = requests.post(push_url, headers=headers, json=img_payload)
+    if line_res.status_code == 200:
+        print("LINE送信完了")
+    else:
+        print(f"LINE画像送信エラー: {line_res.text}")
 else:
-    print(f"LINE送信失敗: {res.text}")
+    print(f"アップロード失敗: {up_res.text}")
