@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
@@ -18,7 +19,7 @@ if not all([GEMINI_KEY, LINE_TOKEN, LINE_USER]):
 client = genai.Client(api_key=GEMINI_KEY)
 
 # ----------------------------------------------------
-# 2. 画像読み込み & Gemini 抽出処理
+# 2. 画像読み込み & Gemini 抽出処理（リトライ機能付き）
 # ----------------------------------------------------
 image_path = "sample.jpg"
 if not os.path.exists(image_path):
@@ -41,14 +42,28 @@ prompt = """
 """
 
 print("Gemini APIへ画像を送信中...")
-response = client.models.generate_content(
-    model="gemini-3.6-flash",
-    contents=[image, prompt],
-    config=types.GenerateContentConfig(
-        response_mime_type="application/json",
-        temperature=0.1
-    ),
-)
+
+# 503混雑エラー対策：最大4回まで自動再試行
+max_retries = 4
+response = None
+
+for attempt in range(max_retries):
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=[image, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1
+            ),
+        )
+        break
+    except Exception as e:
+        print(f"呼び出し待機中 (試行 {attempt + 1}/{max_retries}): {e}")
+        if attempt < max_retries - 1:
+            time.sleep(5 * (attempt + 1))  # 5秒、10秒、15秒と待機時間を延ばして再試行
+        else:
+            raise e
 
 raw_text = response.text.strip()
 print(f"--- Gemini 生レスポンス（先頭300文字） ---\n{raw_text[:300]}\n--------------------------")
@@ -158,7 +173,6 @@ with Image.open(output_path) as img:
 # 5. LINE対応画像アップロード（tmpfiles.org & ダイレクト変換）
 # ----------------------------------------------------
 def upload_direct_image(path):
-    # tmpfiles.orgの正規エンドポイントへアップロード
     upload_url = "https://tmpfiles.org/api/v1/upload"
     with open(path, "rb") as f:
         res = requests.post(upload_url, files={"file": f}, timeout=30)
@@ -166,7 +180,6 @@ def upload_direct_image(path):
     if res.status_code == 200:
         res_json = res.json()
         raw_url = res_json["data"]["url"]
-        # LINEが直接ダウンロードできるように /dl/ を挿入した直リンクに変換
         direct_url = raw_url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
         return direct_url
     else:
