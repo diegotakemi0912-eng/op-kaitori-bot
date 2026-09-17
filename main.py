@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
@@ -12,8 +13,7 @@ LINE_USER = os.environ.get("LINE_USER_ID")
 
 client = genai.Client(api_key=GEMINI_KEY)
 
-# 2. 画像読み込み & Gemini 抽出
-# ※ ここではリポジトリ内に配置した sample.jpg を参照
+# 2. 画像読み込み & Gemini 抽出（503混雑対策の自動リトライ付き）
 image_path = "sample.jpg"
 image = Image.open(image_path)
 
@@ -30,15 +30,34 @@ prompt = """
 ]
 """
 
-response = client.models.generate_content(
-    model="gemini-3.6-flash",
-    contents=[image, prompt],
-    config=types.GenerateContentConfig(
-        response_mime_type="application/json",
-        temperature=0.1
-    ),
-)
+max_retries = 4
+retry_delay = 5
+response = None
+
+for attempt in range(max_retries):
+    try:
+        print(f"Gemini API 呼び出し中... (試行 {attempt + 1}/{max_retries})")
+        response = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=[image, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1
+            ),
+        )
+        print("API呼び出し成功")
+        break
+    except Exception as e:
+        print(f"APIエラー検出: {e}")
+        if attempt < max_retries - 1:
+            print(f"{retry_delay}秒待機して再試行します...")
+            time.sleep(retry_delay)
+            retry_delay *= 2  # 待機時間を5秒→10秒→20秒と伸ばす
+        else:
+            raise e
+
 extracted_data = json.loads(response.text)
+print(f"抽出データ件数: {len(extracted_data)}件")
 
 # 3. 価格計算
 inventory_data = {"OP05-119": 1, "OP01-120": 6}
@@ -109,7 +128,10 @@ def upload_imgur(path):
     headers = {"Authorization": "Client-ID c3ecbf76d05f77a"}
     with open(path, "rb") as f:
         res = requests.post("https://api.imgur.com/3/image", headers=headers, files={"image": f})
-    return res.json()["data"]["link"]
+    if res.status_code == 200:
+        return res.json()["data"]["link"]
+    else:
+        raise Exception(f"Imgurアップロード失敗: {res.text}")
 
 orig_url = upload_imgur(output_path)
 prev_url = upload_imgur(preview_path)
@@ -127,5 +149,8 @@ payload = {
         {"type": "text", "text": "画像を保存してXへポストしてください。"}
     ]
 }
-requests.post("https://api.line.me/v2/bot/message/push", headers=line_headers, json=payload)
-print("LINE送信完了")
+res = requests.post("https://api.line.me/v2/bot/message/push", headers=line_headers, json=payload)
+if res.status_code == 200:
+    print("LINE送信完了")
+else:
+    print(f"LINE送信失敗: {res.text}")
