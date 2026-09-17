@@ -2,8 +2,9 @@ name: Daily Kaitori Bot
 
 on:
   schedule:
-    # 毎日 日本時間 11:00（UTC 02:00）
+    # 毎日 日本時間 11:00（UTC 02:00）に自動実行
     - cron: '0 2 * * *'
+  # 手動テスト用
   workflow_dispatch:
 
 jobs:
@@ -27,17 +28,15 @@ jobs:
       - name: ライブラリのインストール
         run: |
           pip install -r requirements.txt
-          # Playwright用ブラウザのセットアップ
           playwright install chromium --with-deps
 
-      - name: 競合店の最新画像を取得
+      - name: ラフテルの最新買取画像を取得
         env:
-          # 監視したい競合のXアカウント名（@なし）
-          TARGET_X_USERNAME: "kintaro_ikebukuro"
+          TARGET_X_USERNAME: "card_raftel"
         run: |
           python fetch_competitor.py
 
-      - name: 買取表解析・生成・LINE送信
+      - name: 買取表解析・自社計算・LINE送信
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
